@@ -6,6 +6,7 @@ int magic = -0x10384;
 int
 main(void) {
     int pid, code;
+    cprintf("in lab5, we call this function.\n");
     cprintf("I am the parent. Forking the child...\n");
     if ((pid = fork()) == 0) {
         cprintf("I am the child.\n");

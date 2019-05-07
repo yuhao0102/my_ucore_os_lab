@@ -361,8 +361,6 @@ do_pgfault(struct mm_struct *mm, uint32_t error_code, uintptr_t addr) {
     *   mm->pgdir : the PDT of these vma
     *
     */
-
-    /*LAB3 EXERCISE 1: YOUR CODE*/
     ptep = get_pte(mm->pgdir, addr, 1);
     if (ptep == NULL) {
         cprintf("get_pte return a NULL.\n");

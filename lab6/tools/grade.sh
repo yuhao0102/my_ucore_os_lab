@@ -571,6 +571,8 @@ run_test -prog 'matrix'     -check default_check                \
         'init check memory pass.'                               \
     ! - 'user panic at .*'
 
+show_final
+
 pts=20
 timeout=150
 run_test -prog 'priority'      -check default_check             \

@@ -791,19 +791,101 @@ int fd1 = safe_open("sfs\_filetest1", O_RDONLY);
 ```
 如果ucore能够正常查找到这个文件，就会返回一个代表文件的文件描述符fd1，这样在接下来的读写文件过程中，就直接用这样fd1来代表就可以了。
 
+safe_open实现如下，在open中调用了sys_open，接着调用了syscall，执行系统调用：
+```
+static int safe_open(const char *path, int open_flags)
+{
+        int fd = open(path, open_flags);
+        printf("fd is %d\n",fd);
+        assert(fd >= 0);
+        return fd;
+}
+```
+
 ##### 通用文件访问接口层的处理流程
-进一步调用如下用户态函数： `open->sys_open`->`syscall`，从而引起系统调用进入到内核态。到了内核态后，通过中断处理例程，会调用到`sys_open`内核函数，并进一步调用`sysfile_open`内核函数。到了这里，需要把位于用户空间的字符串"sfs_filetest1"拷贝到内核空间中的字符串path中，并进入到文件系统抽象层的处理流程完成进一步的打开文件操作中。
+进一步调用如下用户态函数： `open->sys_open`->`syscall`，从而引起系统调用进入到内核态。到了内核态后，通过中断处理例程，会调用到`sys_open`内核函数，并进一步调用`sysfile_open`内核函数。到了这里，需要把位于用户空间的字符串"sfs_filetest1"拷贝到内核空间中的字符串path中，这里copy_path完成了本功能，这里不再列出。进入到文件系统抽象层的处理流程完成进一步的打开文件操作中。
+```
+static int
+sys_open(uint32_t arg[]) {
+    const char *path = (const char *)arg[0];
+    uint32_t open_flags = (uint32_t)arg[1];
+    return sysfile_open(path, open_flags);
+}
+
+/* sysfile_open - open file */
+int
+sysfile_open(const char *__path, uint32_t open_flags) {
+    int ret;
+    char *path;
+    if ((ret = copy_path(&path, __path)) != 0) {
+        return ret;
+    }
+    ret = file_open(path, open_flags);
+    kfree(path);
+    return ret;
+}
+```
 
 ##### 文件系统抽象层的处理流程
 - 分配一个空闲的file数据结构变量file。
     - 在文件系统抽象层的处理中，首先调用的是file_open函数，它要给这个即将打开的文件分配一个file数据结构的变量，这个变量其实是当前进程的打开文件数组`current->fs_struct->filemap[]`中的一个空闲元素（即还没用于一个打开的文件），而这个元素的索引值就是最终要返回到用户进程并赋值给变量fd1。到了这一步还仅仅是给当前用户进程分配了一个file数据结构的变量，还没有找到对应的文件索引节点。
+
 - 调用`vfs_open`函数来找到path指出的文件所对应的基于inode数据结构的VFS索引节点node。
     - `vfs_open`函数需要完成两件事情：
         - 通过vfs_lookup找到path对应文件的inode；
         - 调用vop_open函数打开文件。
     - 找到文件设备的根目录“/”的索引节点需要注意，这里的`vfs_lookup`函数是一个针对目录的操作函数，它会调用`vop_lookup`函数来找到SFS文件系统中的“/”目录下的“sfs_filetest1”文件。为此，`vfs_lookup`函数首先调用`get_device`函数，并进一步调用`vfs_get_bootfs`函数来找到根目录“/”对应的inode。这个inode就是位于vfs.c中的inode变量bootfs_node。这个变量在init_main函数（位于kern/process/proc.c）执行时获得了赋值。
     - 通过调用vop_lookup函数来查找到根目录“/”下对应文件sfs_filetest1的索引节点，如果找到就返回此索引节点。
-    - 把file和node建立联系。完成后，将返回到file_open函数中，通过执行语句“file->node=node;”，就把当前进程的current->fs_struct->filemap[fd]（即file所指变量）的成员变量node指针指向了代表sfs_filetest1文件的索引节点inode。这时返回fd。经过重重回退，通过系统调用返回，用户态的syscall->sys_open->open->safe_open等用户函数的层层函数返回，最终把fd赋值给fd1。自此完成了打开文件操作。
+- 把file和node建立联系。完成后，将返回到file_open函数中，通过执行语句“file->node=node;”，就把当前进程的current->fs_struct->filemap[fd]（即file所指变量）的成员变量node指针指向了代表sfs_filetest1文件的索引节点inode。
+- 这时返回fd。经过重重回退，通过系统调用返回，用户态的syscall->sys_open->open->safe_open等用户函数的层层函数返回，最终把fd赋值给fd1。自此完成了打开文件操作。
+```
+// open file
+int
+file_open(char *path, uint32_t open_flags) {
+    bool readable = 0, writable = 0;
+    switch (open_flags & O_ACCMODE) {
+        case O_RDONLY: readable = 1; break;
+        case O_WRONLY: writable = 1; break;
+        case O_RDWR:
+            readable = writable = 1;
+            break;
+        default:
+            return -E_INVAL;
+    }
+
+    int ret;
+    struct file *file;
+    if ((ret = fd_array_alloc(NO_FD, &file)) != 0) {
+        return ret;
+    }
+//分配一个file数据结构的变量
+
+    struct inode *node;
+    if ((ret = vfs_open(path, open_flags, &node)) != 0) {
+        fd_array_free(file);
+        return ret;
+    }
+//找到path指出的文件所对应的基于inode数据结构的VFS索引节点node
+
+    file->pos = 0;
+    if (open_flags & O_APPEND) {
+        struct stat __stat, *stat = &__stat;
+        if ((ret = vop_fstat(node, stat)) != 0) {
+            vfs_close(node);
+            fd_array_free(file);
+            return ret;
+        }
+        file->pos = stat->st_size;
+    }
+// 根据open_flags找当前指针应该指在文件的什么位置
+
+    file->node = node;
+    file->readable = readable;
+    file->writable = writable;
+    fd_array_open(file);
+    return file->fd;
+}    	
+```
 
 ##### SFS文件系统层的处理流程
 在sfs_inode.c中的`sfs_node_dirops`变量定义了“.vop_lookup = sfs_lookup”，所以我们重点分析sfs_lookup的实现。
@@ -821,6 +903,15 @@ read(fd, data, len);
 
 ##### 通用文件访问接口层的处理流程
 进一步调用如下用户态函数：`read->sys_read->syscall`，从而引起系统调用进入到内核态。到了内核态以后，通过中断处理例程，会调用到`sys_read`内核函数，并进一步调用`sysfile_read`内核函数，进入到文件系统抽象层处理流程完成进一步读文件的操作。
+```
+static int
+sys_read(uint32_t arg[]) {
+    int fd = (int)arg[0];
+    void *base = (void *)arg[1];
+    size_t len = (size_t)arg[2];
+    return sysfile_read(fd, base, len);
+}
+```
 
 ##### 文件系统抽象层的处理流程
 - 检查错误，即检查读取长度是否为0和文件是否可读。
@@ -844,6 +935,93 @@ read(fd, data, len);
         - 调用vop_read函数将文件内容读到iob中（详细分析见后）。
         - 调整文件指针偏移量pos的值，使其向后移动实际读到的字节数iobuf_used(iob)。
         - 调用filemap_release函数使打开这个文件的计数减1，若打开计数为0，则释放file。
+```
+/* sysfile_read - read file */
+int
+sysfile_read(int fd, void *base, size_t len) {
+    struct mm_struct *mm = current->mm;
+    if (len == 0) {
+        return 0;
+    }
+    if (!file_testfd(fd, 1, 0)) {
+        return -E_INVAL;
+    }
+// 检查读取长度是否为0和文件是否可读
+
+    void *buffer;
+    if ((buffer = kmalloc(IOBUF_SIZE)) == NULL) {
+        return -E_NO_MEM;
+    }
+// 调用kmalloc函数分配4096字节的buffer空间
+
+    int ret = 0;
+    size_t copied = 0, alen;
+    while (len != 0) {
+        if ((alen = IOBUF_SIZE) > len) {
+            alen = len;
+        }
+        ret = file_read(fd, buffer, alen, &alen);
+        // 将文件内容读取到buffer中，alen为实际大小       
+        if (alen != 0) {
+            lock_mm(mm);
+            {
+                if (copy_to_user(mm, base, buffer, alen)) {
+                    assert(len >= alen);
+                    base += alen, len -= alen, copied += alen;
+                }
+                // 调用copy_to_user函数将读到的内容拷贝到用户的内存空间中
+                // 调整各变量以进行下一次循环读取，直至指定长度读取完成
+                else if (ret == 0) {
+                    ret = -E_INVAL;
+                }
+            }
+            unlock_mm(mm);
+        }
+        if (ret != 0 || alen == 0) {
+            goto out;
+        }
+    }
+
+out:
+    kfree(buffer);
+    if (copied != 0) {
+        return copied;
+    }
+    return ret;
+}                    
+```
+```
+
+// read file
+int
+file_read(int fd, void *base, size_t len, size_t *copied_store) {
+    int ret;
+    struct file *file;
+    *copied_store = 0;
+    if ((ret = fd2file(fd, &file)) != 0) {
+        return ret;
+    }
+    // 找到对应的file结构
+
+    if (!file->readable) {
+        return -E_INVAL;
+    }
+    fd_array_acquire(file);
+    // 打开这个文件的计数加1
+
+    struct iobuf __iob, *iob = iobuf_init(&__iob, base, len, file->pos);
+    ret = vop_read(file->node, iob);
+    // 文件内容读到iob中
+
+    size_t copied = iobuf_used(iob);
+    if (file->status == FD_OPENED) {
+        file->pos += copied;
+    }
+    *copied_store = copied;
+    fd_array_release(file);
+    return ret;
+}
+```
 
 ##### SFS文件系统层的处理流程
 `vop_read`函数实际上是对`sfs_read`的包装。在sfs_inode.c中`sfs_node_fileops`变量定义了`.vop_read = sfs_read`，所以下面来分析sfs_read函数的实现。
@@ -852,6 +1030,47 @@ read(fd, data, len);
     - 函数先找到inode对应sfs和sin，
     - 然后调用sfs_io_nolock函数进行读取文件操作，
     - 最后调用iobuf_skip函数调整iobuf的指针。
+```
+/*
+ * sfs_io - Rd/Wr file. the wrapper of sfs_io_nolock
+            with lock protect
+ */
+static inline int
+sfs_io(struct inode *node, struct iobuf *iob, bool write) {
+    struct sfs_fs *sfs = fsop_info(vop_fs(node), sfs);
+    struct sfs_inode *sin = vop_info(node, sfs_inode);
+    int ret;
+    lock_sin(sin);
+    {
+        size_t alen = iob->io_resid;
+        ret = sfs_io_nolock(sfs, sin, iob->io_base, iob->io_offset, &alen, write);
+        if (alen != 0) {
+            iobuf_skip(iob, alen);
+        }
+    }
+    unlock_sin(sin);
+    return ret;
+}
+
+/*
+ * iobuf_skip - change the current position of io buffer
+ */
+void
+iobuf_skip(struct iobuf *iob, size_t n) {
+    assert(iob->io_resid >= n);
+    iob->io_base += n, iob->io_offset += n, iob->io_resid -= n;
+}
+```
+
+### 练习1: 完成读文件操作的实现
+首先完成proc.c中process控制块的初始化，在`static struct proc_struct *alloc_proc(void)`中添加：
+```
+proc->filesp = NULL;
+```
+
+如果调用了read系统调用，继续调用sys_read函数，和sysfile_read函数，在这个函数中，创建了缓冲区，进一步复制到用户空间的指定位置去；从文件读取数据的函数是file_read。
+
+在file_read函数中，通过文件描述符找到相应文件对应的内存中的inode信息，调用vop_read进行读取处理，vop_read继续调用sfs_read函数，然后调用sfs_io函数和sfs_io_nolock函数。
 
 - 在sfs_io_nolock函数中，
     - 先计算一些辅助变量，并处理一些特殊情况（比如越界），
@@ -865,11 +1084,78 @@ read(fd, data, len);
     - sfs_rbuf和sfs_rblock函数最终都调用sfs_rwblock_nolock函数完成操作，
     - 而sfs_rwblock_nolock函数调用dop_io->disk0_io->disk0_read_blks_nolock->ide_read_secs完成对磁盘的操作。
 
+```
+/*
+ * sfs_io_nolock - Rd/Wr a file contentfrom offset position to offset+ length  disk blocks<-->buffer (in memroy) * @sfs:      sfs file system
+ * @sin:      sfs inode in memory
+ * @buf:      the buffer Rd/Wr
+ * @offset:   the offset of file
+ * @alenp:    the length need to read (is a pointer). and will RETURN the really Rd/Wr lenght
+ * @write:    BOOL, 0 read, 1 write
+ */
+static int
+sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset, size_t *alenp, bool write) {
+    struct sfs_disk_inode *din = sin->din;
+    assert(din->type != SFS_TYPE_DIR);
+    off_t endpos = offset + *alenp, blkoff;
+    *alenp = 0;
+        // calculate the Rd/Wr end position
+    if (offset < 0 || offset >= SFS_MAX_FILE_SIZE || offset > endpos) {
+        return -E_INVAL;
+    }
+    if (offset == endpos) {
+        return 0;
+    }
+    if (endpos > SFS_MAX_FILE_SIZE) {
+        endpos = SFS_MAX_FILE_SIZE;
+    }
+    if (!write) {
+        if (offset >= din->size) {
+            return 0;
+        }
+        if (endpos > din->size) {
+            endpos = din->size;
+        }
+    }
 
+    int (*sfs_buf_op)(struct sfs_fs *sfs, void *buf, size_t len, uint32_t blkno, off_t offset);
+    int (*sfs_block_op)(struct sfs_fs *sfs, void *buf, uint32_t blkno, uint32_t nblks);
+    if (write) {
+        sfs_buf_op = sfs_wbuf, sfs_block_op = sfs_wblock;
+    }
+    else {
+        sfs_buf_op = sfs_rbuf, sfs_block_op = sfs_rblock;
+    }
+    // 设置读取的函数操作
 
+    int ret = 0;
+    size_t size, alen = 0;
+    uint32_t ino;
+    uint32_t blkno = offset / SFS_BLKSIZE;          // The NO. of Rd/Wr begin block
+    uint32_t nblks = endpos / SFS_BLKSIZE - blkno;  // The size of Rd/Wr blocks
 
-
-
+//LAB8:EXERCISE1 YOUR CODE HINT: call sfs_bmap_load_nolock, sfs_rbuf, sfs_rblock,etc. read different kind of b
+locks in file
+        /*
+         * (1) If offset isn't aligned with the first block, Rd/Wr some content from offset to the end of the fi
+rst block
+         *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op
+         *               Rd/Wr size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - offset)
+         * (2) Rd/Wr aligned blocks
+         *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_block_op
+         * (3) If end position isn't aligned with the last block, Rd/Wr some content from begin to the (endpos % SFS
+_BLKSIZE) of the last block
+         *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op
+         */
+out:
+    *alenp = alen;
+    if (offset + alen > sin->din->size) {
+        sin->din->size = offset + alen;
+        sin->dirty = 1;
+    }
+    return ret;
+}    
+```
 
 
 ```

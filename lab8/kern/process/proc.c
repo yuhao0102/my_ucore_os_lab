@@ -143,6 +143,8 @@ alloc_proc(void) {
         memset(&proc->lab6_run_pool,0,sizeof(skew_heap_entry_t));
         proc->lab6_stride=0;
         proc->lab6_priority=1;
+        //LAB8:EXERCISE2 your code HINT:need add some code to init fs in proc_struct, ...
+        proc->filesp = NULL;
     }
     return proc;
 }
@@ -508,7 +510,9 @@ do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf) {
     wakeup_proc(proc);
     //    7. set ret vaule using child proc's pid
     ret = proc->pid;
-	
+    // for LAB8
+    copy_files(clone_flags, proc);
+        
 fork_out:
     return ret;
 
@@ -544,6 +548,7 @@ do_exit(int error_code) {
         }
         current->mm = NULL;
     }
+
     put_files(current); //for LAB8
     current->state = PROC_ZOMBIE;
     current->exit_code = error_code;

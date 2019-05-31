@@ -106,23 +106,43 @@ alloc_proc(void) {
      *       uint32_t flags;                             // Process flag
      *       char name[PROC_NAME_LEN + 1];               // Process name
      */
-     //LAB5 YOUR CODE : (update LAB4 steps)
-    /*
-     * below fields(add in LAB5) in proc_struct need to be initialized	
-     *       uint32_t wait_state;                        // waiting state
-     *       struct proc_struct *cptr, *yptr, *optr;     // relations between processes
-	 */
-     //LAB6 YOUR CODE : (update LAB5 steps)
-    /*
-     * below fields(add in LAB6) in proc_struct need to be initialized
-     *     struct run_queue *rq;                       // running queue contains Process
-     *     list_entry_t run_link;                      // the entry linked in run queue
-     *     int time_slice;                             // time slice for occupying the CPU
-     *     skew_heap_entry_t lab6_run_pool;            // FOR LAB6 ONLY: the entry in the run pool
-     *     uint32_t lab6_stride;                       // FOR LAB6 ONLY: the current stride of the process
-     *     uint32_t lab6_priority;                     // FOR LAB6 ONLY: the priority of process, set by lab6_set_priority(uint32_t)
-     */
-    //LAB8:EXERCISE2 YOUR CODE HINT:need add some code to init fs in proc_struct, ...
+        proc->state = PROC_UNINIT;
+        proc->pid = -1;
+        proc->cr3 = boot_cr3;
+       
+        proc->runs = 0;
+        proc->kstack = 0;
+        proc->need_resched = 0;
+        proc->parent = NULL;
+        proc->mm = NULL;
+        memset(&proc->context, 0, sizeof(struct context)); 
+        proc->tf = NULL;
+        proc->flags = 0;
+        memset(proc->name, 0, PROC_NAME_LEN);         
+         //LAB5 YOUR CODE : (update LAB4 steps)
+        /*
+         * below fields(add in LAB5) in proc_struct need to be initialized  
+         *       uint32_t wait_state;                        // waiting state
+         *       struct proc_struct *cptr, *yptr, *optr;     // relations between processes
+         */
+        proc->wait_state = 0;
+        proc->cptr = proc->optr = proc->yptr = NULL;
+        //LAB6 YOUR CODE : (update LAB5 steps)
+        /*
+         * below fields(add in LAB6) in proc_struct need to be initialized
+         *     struct run_queue *rq;                       // running queue contains Process
+         *     list_entry_t run_link;                      // the entry linked in run queue
+         *     int time_slice;                             // time slice for occupying the CPU
+         *     skew_heap_entry_t lab6_run_pool;            // FOR LAB6 ONLY: the entry in the run pool
+         *     uint32_t lab6_stride;                       // FOR LAB6 ONLY: the current stride of the process
+         *     uint32_t lab6_priority;                     // FOR LAB6 ONLY: the priority of process, set by lab6_set_priority(uint32_t)
+         */
+        proc->rq = NULL;
+        memset(&proc->run_link, 0, sizeof(list_entry_t));
+        proc->time_slice = 0;
+        memset(&proc->lab6_run_pool,0,sizeof(skew_heap_entry_t));
+        proc->lab6_stride=0;
+        proc->lab6_priority=1;
     }
     return proc;
 }
@@ -458,9 +478,36 @@ do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf) {
    /* Some Functions
     *    set_links:  set the relation links of process.  ALSO SEE: remove_links:  lean the relation links of process 
     *    -------------------
-	*    update step 1: set child proc's parent to current process, make sure current process's wait_state is 0
-	*    update step 5: insert proc_struct into hash_list && proc_list, set the relation links of process
+	  *    update step 1: set child proc's parent to current process, make sure current process's wait_state is 0
+	  *    update step 5: insert proc_struct into hash_list && proc_list, set the relation links of process
     */
+    proc = alloc_proc();
+    if(proc == NULL)
+        goto fork_out;    
+    //    2. call setup_kstack to allocate a kernel stack for child process
+    proc->parent = current;
+    assert(current->wait_state == 0);
+
+    int status = setup_kstack(proc);
+    if(status != 0)
+        goto bad_fork_cleanup_kstack;
+    //    3. call copy_mm to dup OR share mm according clone_flag
+    status = copy_mm(clone_flags, proc);
+    if(status != 0)
+        goto bad_fork_cleanup_proc;
+    //    4. call copy_thread to setup tf & context in proc_struct
+    copy_thread(proc, stack, tf);
+    //    5. insert proc_struct into hash_list && proc_list
+    
+    proc->pid = get_pid();
+    hash_proc(proc);
+    set_links(proc);
+    //nr_process ++;
+    //list_add(&proc_list, &proc->list_link);
+    //    6. call wakeup_proc to make the new child process RUNNABLE
+    wakeup_proc(proc);
+    //    7. set ret vaule using child proc's pid
+    ret = proc->pid;
 	
 fork_out:
     return ret;

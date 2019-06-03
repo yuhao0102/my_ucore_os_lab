@@ -46,6 +46,7 @@ RR_proc_tick(struct run_queue *rq, struct proc_struct *proc) {
         proc->need_resched = 1;
     }
 }
+
 /*
 struct sched_class default_sched_class = {
     .name = "RR_scheduler",

@@ -10,8 +10,8 @@
 #define THINKING 0 /* 哲学家正在思考 */
 #define HUNGRY 1 /* 哲学家想取得叉子 */
 #define EATING 2 /* 哲学家正在吃面 */
-#define TIMES  4 /* 吃4次饭 */
-#define SLEEP_TIME 10
+#define TIMES  0 /* 吃4次饭 */
+#define SLEEP_TIME 1
 
 //-----------------philosopher problem using monitor ------------
 /*PSEUDO CODE :philosopher problem using semaphore

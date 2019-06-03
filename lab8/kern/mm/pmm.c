@@ -418,6 +418,7 @@ page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) {
             free_page(page);
         }
         *ptep = 0;
+        //???*ptep &= (~PTE_P);
         tlb_invalidate(pgdir, la);
     }
 }

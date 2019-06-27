@@ -401,7 +401,9 @@ cv.count -- ;
 情况一：如果monitor.next_count如果大于0，表示有大于等于1个进程执行cond_signal函数且睡了，就睡在了monitor.next信号量上（假定这些进程挂在monitor.next信号量相关的等待队列Ｓ上），因此需要唤醒等待队列Ｓ中的一个进程B；然后进程A睡在cv.sem上。如果进程A醒了，则让cv.count减一，表示等待此条件变量的睡眠进程个数少了一个，可继续执行了！
 
 这里隐含这一个现象，即某进程A在时间顺序上先执行了cond_signal，而另一个进程B后执行了cond_wait，这会导致进程A没有起到唤醒进程B的作用。
+
 问题: 在cond_wait有sem_signal(mutex)，但没有看到哪里有sem_wait(mutex)，这好像没有成对出现，是否是错误的？ 答案：其实在管程中的每一个函数的入口处会有wait(mutex)，这样二者就配好对了。
+
 情况二：如果monitor.next_count如果小于等于0，表示目前没有进程执行cond_signal函数且睡着了，那需要唤醒的是由于互斥条件限制而无法进入管程的进程，所以要唤醒睡在monitor.mutex上的进程。然后进程A睡在cv.sem上，如果睡醒了，则让cv.count减一，表示等待此条件的睡眠进程个数少了一个，可继续执行了！
 然后来看signal_cv的原理实现：
 ```

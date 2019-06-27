@@ -107,14 +107,14 @@ ld -m elf_i386 -nostdlib -T tools/kernel.ld -o bin/kernel
   obj/__user_forktest.out obj/__user_pgdir.out
 ```
 从中可以看出，hello应用程序不仅仅是hello.c，还包含了支持hello应用程序的用户态库：
-- user/libs/initcode.S：所有应用程序的起始用户态执行地址“_start”，调整了EBP和ESP后，调用umain函数。
+- user/libs/initcode.S：所有应用程序的起始用户态执行地址“\_start”，调整了EBP和ESP后，调用umain函数。
 - user/libs/umain.c：实现了umain函数，这是所有应用程序执行的第一个C函数，它将调用应用程序的main函数，并在main函数结束后调用exit函数，而exit函数最终将调用sys_exit系统调用，让操作系统回收进程资源。
 - user/libs/ulib.[ch]：实现了最小的C函数库，除了一些与系统调用无关的函数，其他函数是对访问系统调用的包装。
 - user/libs/syscall.[ch]：用户层发出系统调用的具体实现。
 - user/libs/stdio.c：实现cprintf函数，通过系统调用sys_putc来完成字符输出。
 - user/libs/panic.c：实现\_\_panic/\_\_warn函数，通过系统调用sys_exit完成用户进程退出。
 
-在make的最后一步执行了一个ld命令，把hello应用程序的执行码obj/\_\_user_hello.out连接在了ucore kernel的末尾。且ld命令会在kernel中会把\_\_user_hello.out的位置和大小记录在全局变量**\_binary_obj\_\_\_user_hello_out_start**和**\_binary_obj\_\_\_user_hello_out_size**中，这样这个hello用户程序就能够和ucore内核一起被 bootloader 加载到内存里中，并且通过这两个全局变量定位hello用户程序执行码的起始位置和大小。
+在make的最后一步执行了一个ld命令，把hello应用程序的执行码obj/\_\_user_hello.out连接在了ucore kernel的末尾。且ld命令会在kernel中会把\_\_user_hello.out的位置和大小记录在全局变量**\_binary_obj\_\_\_user_hello_out_start**和**\_binary_obj\_\_\_user_hello_out_size**中，这样这个hello用户程序就能够和ucore内核一起被 bootloader加载到内存里中，并且通过这两个全局变量定位hello用户程序执行码的起始位置和大小。
 
 #### 用户进程的虚拟地址空间
 在tools/user.ld描述了用户程序的用户虚拟空间的执行入口虚拟地址：

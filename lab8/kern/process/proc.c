@@ -643,70 +643,73 @@ load_icode(int fd, int argc, char **kargv) {
     //(3) copy TEXT/DATA section, build BSS parts in binary to memory space of process
     struct Page *page;
     //(3.1) get the file header of the bianry program (ELF format)
-    struct elfhdr elf, *elfpoint = &elf;
+    struct elfhdr elf;
     off_t offset = 0;
 
-    if((ret = load_icode_read(fd, (void*)elfpoint,sizeof(struct elfhdr), 0)) != 0) {
+    if((ret = load_icode_read(fd, &elf, sizeof(struct elfhdr), 0)) != 0) {
         goto bad_elf_cleanup_pgdir;
     }	
-    if (elfpoint->e_magic != ELF_MAGIC) {
+    if (elf.e_magic != ELF_MAGIC) {	
         ret = -E_INVAL_ELF;
         goto bad_elf_cleanup_pgdir;
     }
     offset += sizeof(struct elfhdr);
 
     uint32_t vm_flags, perm;
-    struct proghdr ph, *phpoint=&ph;
-    for (int i=0; i < elfpoint->e_phnum; i ++) {
+    struct proghdr ph;
+    for (int i=0; i < elf.e_phnum; i ++) {
     //(3.4) find every program section headers
-        load_icode_read(fd, (void*)phpoint, sizeof(struct proghdr), elfpoint->e_phoff+i*sizeof(struct proghdr));
-        if (phpoint->p_type != ELF_PT_LOAD) {
+        off_t phoff = elf.e_phoff + sizeof(struct proghdr) * i;
+	      load_icode_read(fd, &ph, sizeof(struct proghdr), phoff);
+        if (ph.p_type != ELF_PT_LOAD) {
             continue ;
         }
-        if (phpoint->p_filesz > phpoint->p_memsz) {
+        if (ph.p_filesz > ph.p_memsz) {
             ret = -E_INVAL_ELF;
             goto bad_cleanup_mmap;
         }
-        if (phpoint->p_filesz == 0) {
+        if (ph.p_filesz == 0) {
             continue ;
         }
         // call mm_map fun to setup the new vma ( ph->p_va, ph->p_memsz)
         vm_flags = 0, perm = PTE_U;
-        if (phpoint->p_flags & ELF_PF_X) vm_flags |= VM_EXEC;
-        if (phpoint->p_flags & ELF_PF_W) vm_flags |= VM_WRITE;
-        if (phpoint->p_flags & ELF_PF_R) vm_flags |= VM_READ;
+        if (ph.p_flags & ELF_PF_X) vm_flags |= VM_EXEC;
+        if (ph.p_flags & ELF_PF_W) vm_flags |= VM_WRITE;
+        if (ph.p_flags & ELF_PF_R) vm_flags |= VM_READ;
         if (vm_flags & VM_WRITE) perm |= PTE_W;
-        if ((ret = mm_map(mm, phpoint->p_va, phpoint->p_memsz, vm_flags, NULL)) != 0) {
+        if ((ret = mm_map(mm, ph.p_va, ph.p_memsz, vm_flags, NULL)) != 0) {
             goto bad_cleanup_mmap;
         }
         
-	offset = phpoint->p_offset;
+        offset = ph.p_offset;
         size_t off, size;
-        uintptr_t start = phpoint->p_va, end=phpoint->p_va+phpoint->p_filesz, la = ROUNDDOWN(start, PGSIZE);
-
+        uintptr_t start = ph.p_va, end, la = ROUNDDOWN(start, PGSIZE);
+	
         ret = -E_NO_MEM;
-
+	      end=ph.p_va+ph.p_filesz;
         while (start < end) {
             if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+                ret = -E_NO_MEM;
                 goto bad_cleanup_mmap;
             }
             off = start - la, size = PGSIZE - off, la += PGSIZE;
             if (end < la) {
                 size -= la - end;
             }
-	    load_icode_read(fd, page2kva(page)+off, size, offset);
-//            memcpy(page2kva(page) + off, from, size);
-            start += size, offset += size;
+            load_icode_read(fd, page2kva(page)+off, size, offset);
+            start += size;
+	    offset += size;
         }
 
       // build BSS section of binary program
-        end = phpoint->p_va + phpoint->p_memsz;
+        end = ph.p_va + ph.p_memsz;
         if (start < la) {
             /* ph->p_memsz == ph->p_filesz */
             if (start == end) {
                 continue ;
             }
-            off = start + PGSIZE - la, size = PGSIZE - off;
+            off = start + PGSIZE - la;
+	    size = PGSIZE - off;
             if (end < la) {
                 size -= la - end;
             }
@@ -718,7 +721,9 @@ load_icode(int fd, int argc, char **kargv) {
             if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
                 goto bad_cleanup_mmap;
             }
-            off = start - la, size = PGSIZE - off, la += PGSIZE;
+            off = start - la;
+	    size = PGSIZE - off;
+	    la += PGSIZE;
             if (end < la) {
                 size -= la - end;
             }
@@ -727,20 +732,21 @@ load_icode(int fd, int argc, char **kargv) {
         }
     }
     sysfile_close(fd);
+    
     //(4) build user stack memory
     vm_flags = VM_READ | VM_WRITE | VM_STACK;
     if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE, vm_flags, NULL)) != 0) {
         goto bad_cleanup_mmap;
     }
 
-    uint32_t stacktop = USTACKTOP;
-    uint32_t argsize = 0;
+    uint32_t argv_size = 0;
     for(int j = 0; j< argc ; j++)
-        argsize += (1 + strlen(kargv[j]));
-    argsize = (argsize / sizeof(long)+1)*sizeof(long);
-    argsize += (2+argc)*sizeof(long);
-    stacktop = USTACKTOP - argsize;
-    uint32_t pagen = argsize / PGSIZE + 4;
+        argv_size += (strlen(kargv[j]) + 1);
+    argv_size = (argv_size / sizeof(long)+1)*sizeof(long);
+    argv_size += (2+argc)*sizeof(long);
+   
+    uint32_t stacktop = USTACKTOP - argv_size;
+    uint32_t pagen = argv_size / PGSIZE + 4;
     for (int j = 1; j <= 4; ++ j) {
         assert(pgdir_alloc_page(mm->pgdir, USTACKTOP-PGSIZE*j , PTE_USER) != NULL);
     }
@@ -751,19 +757,25 @@ load_icode(int fd, int argc, char **kargv) {
     lcr3(PADDR(mm->pgdir));
 
     //(6) setup trapframe for user environment
-    uint32_t now_pos = stacktop, argvp;
-    *((uint32_t*)now_pos) = argc;
-    now_pos += 4;
-    *((uint32_t *) now_pos) = argvp = now_pos + 4;
-    now_pos += 4;
-    now_pos += argc*4;
+    //uint32_t stack_pos = stacktop;
+    //((uint32_t*)stack_pos)[0] = argc;
+    //stack_pos += sizeof(int);
+    //((uint32_t*)stack_pos)[0] = stack_pos + sizeof(int);
+    //stack_pos += sizeof(int);
+    
+    // copy from answer
+    char** uargv=(char **)(stacktop  - argc * sizeof(char *));
+    // the array to save the argvs
+    argv_size = 0;
+    for (int i = 0; i < argc; i ++) {
+        uargv[i] = strcpy((char *)(stacktop + argv_size ), kargv[i]);
+	// copy the argv to user atack
+        argv_size +=  strlen(kargv[i])+1;
+    }
+    
+    stacktop = (uintptr_t)uargv - sizeof(int);
+    *(int *)stacktop = argc;
 
-    for (int j = 0; j < argc; ++ j) {
-        argsize = strlen(kargv[j]) + 1; 
-        memcpy((void *) now_pos, kargv[j], argsize);
-        *((uint32_t *) (argvp + j * 4)) = now_pos;
-        now_pos += argsize;
-    }	
 
     /* LAB5:EXERCISE1 YOUR CODE
      * should set tf_cs,tf_ds,tf_es,tf_ss,tf_esp,tf_eip,tf_eflags
@@ -779,7 +791,7 @@ load_icode(int fd, int argc, char **kargv) {
     tf->tf_cs = USER_CS;
     tf->tf_ds = tf->tf_es = tf->tf_ss = USER_DS;
     tf->tf_esp = stacktop;
-    tf->tf_eip = elfpoint->e_entry;
+    tf->tf_eip = elf.e_entry;
     tf->tf_eflags = 0x2 | FL_IF; // to enable interrupt
     ret = 0;
 out:

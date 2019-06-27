@@ -600,19 +600,23 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
 	 *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op	
 	*/
     
-    if (offset % SFS_BLKSIZE != 0 || endpos / SFS_BLKSIZE == offset / SFS_BLKSIZE) {
-	    blkoff = offset % SFS_BLKSIZE;
+//    if (offset % SFS_BLKSIZE != 0){
+    if (offset % SFS_BLKSIZE != 0 || endpos/SFS_BLKSIZE==offset/SFS_BLKSIZE){
+            blkoff = offset % SFS_BLKSIZE;
 	    size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - offset);
+	    // add some error check, my code didn't check the return value
 	    if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) goto out;
 	    if ((ret = sfs_buf_op(sfs, buf, size, ino, blkoff)) != 0) goto out;
 	    alen += size;
 	    buf += size;
     }
+    // the first incomplete block
     uint32_t my_nblks = nblks;
     if (offset % SFS_BLKSIZE != 0 && my_nblks > 0) 
         my_nblks --;
     if (my_nblks > 0) {
-        if ((ret = sfs_bmap_load_nolock(sfs, sin, (offset % SFS_BLKSIZE == 0) ? blkno: blkno + 1, &ino)) != 0) 
+        uint32_t my_blkno = (offset%SFS_BLKSIZE==0)?blkno:blkno+1;
+	if ((ret = sfs_bmap_load_nolock(sfs, sin, my_blkno, &ino)) != 0) 
 	    goto out;
 	if ((ret = sfs_block_op(sfs, buf, ino, my_nblks)) != 0) 
 	    goto out;
@@ -620,13 +624,15 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
 	alen += size;
 	buf += size;
     }
-    if (endpos % SFS_BLKSIZE != 0 && endpos / SFS_BLKSIZE != offset / SFS_BLKSIZE) {
+//    if (size = endpos % SFS_BLKSIZE != 0 ) {
+    if (endpos % SFS_BLKSIZE != 0 || endpos/SFS_BLKSIZE != offset/SFS_BLKSIZE) {
 	    size = endpos % SFS_BLKSIZE;
 	    if ((ret = sfs_bmap_load_nolock(sfs, sin, endpos / SFS_BLKSIZE, &ino) == 0) != 0) goto out;
 	    if ((ret = sfs_buf_op(sfs, buf, size, ino, 0)) != 0) goto out;
 	    alen += size;
 	    buf += size;
     }
+    // the last incomplete block
 out:
     *alenp = alen;
     if (offset + alen > sin->din->size) {

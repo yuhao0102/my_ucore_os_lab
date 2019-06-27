@@ -179,13 +179,11 @@ sfs_do_mount(struct device *dev, struct fs **fs_store) {
 
     struct sfs_super *super = sfs_buffer;
     if (super->magic != SFS_MAGIC) {
-        cprintf("sfs: wrong magic in superblock. (%08x should be %08x).\n",
-                super->magic, SFS_MAGIC);
+        cprintf("sfs: wrong magic in superblock. (%08x should be %08x).\n",super->magic, SFS_MAGIC);
         goto failed_cleanup_sfs_buffer;
     }
     if (super->blocks > dev->d_blocks) {
-        cprintf("sfs: fs has %u blocks, device has %u blocks.\n",
-                super->blocks, dev->d_blocks);
+        cprintf("sfs: fs has %u blocks, device has %u blocks.\n",super->blocks, dev->d_blocks);
         goto failed_cleanup_sfs_buffer;
     }
     super->info[SFS_MAX_INFO_LEN] = '\0';

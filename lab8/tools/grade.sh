@@ -640,4 +640,4 @@ run_test -prog 'matrix'     -check default_check                \
     ! - 'user panic at .*'
 
 ## print final-score
-show_final
+#show_final

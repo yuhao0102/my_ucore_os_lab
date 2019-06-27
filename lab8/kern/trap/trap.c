@@ -257,7 +257,7 @@ trap_dispatch(struct trapframe *tf) {
     case IRQ_OFFSET + IRQ_COM1:
     case IRQ_OFFSET + IRQ_KBD:
         // There are user level shell in LAB8, so we need change COM/KBD interrupt processing.
-        c = cons_getc();
+	c = cons_getc();
         {
           extern void dev_stdin_write(char c);
           dev_stdin_write(c);

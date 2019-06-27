@@ -137,7 +137,7 @@ struct inode {
     const struct inode_ops *in_ops;     //抽象的inode操作，包含访问inode的函数指针     
 };
 ```
-在inode中，有一成员变量为in_ops，这是对此inode的操作函数指针列表，其数据结构定义如下：
+在inode中，有一成员变量为in_ops，这是对此inode的**操作函数指针列表**，其数据结构定义如下：
 ```
 struct inode_ops {
     unsigned long vop_magic;
@@ -195,6 +195,8 @@ struct bitmap {
 ```
 最后在剩余的磁盘空间中，存放了所有其他目录和文件的inode信息和内容数据信息。需要注意的是虽然inode的大小小于一个块的大小（4096B），但为了实现简单，每个 inode 都占用一个完整的 block。
 在sfs_fs.c文件中的sfs_do_mount函数中，完成了加载位于硬盘上的SFS文件系统的超级块superblock和freemap的工作。这样，在内存中就有了SFS文件系统的全局信息。
+
+在fs_init中分别调用了`vfs_init()`，`dev_init()`和`sfs_init()`，`sfs_init()`中调用了`sfs_mount("disk0")`，`sfs_mount`中调用了`vfs_mount(devname, sfs_do_mount);`，`vfs_mount()`中从设备列表中找到一个名字相同的设备，这个设备的fs应该是NULL，即它是没有被挂载到某个文件系统的。找到这个设备的inode中in_info，调用传进来的mountfunc，即sfs_do_mount
 ```
 /*
  * sfs_do_mount - mount sfs file system.
@@ -212,11 +214,12 @@ sfs_do_mount(struct device *dev, struct fs **fs_store) {
         return -E_NA_DEV;
     }
 
-    /* allocate fs structure */
+    /* 分配一个fs的结构 */
     struct fs *fs;
     if ((fs = alloc_fs(sfs)) == NULL) {
         return -E_NO_MEM;
     }
+    /* 获取这个sfs的sfs_fs */
     struct sfs_fs *sfs = fsop_info(fs, sfs);
     sfs->dev = dev;
 
@@ -226,7 +229,7 @@ sfs_do_mount(struct device *dev, struct fs **fs_store) {
         goto failed_cleanup_fs;
     }
 
-    /* load and check superblock */
+    /* 专门用来读超级块的 */
     if ((ret = sfs_init_read(dev, SFS_BLKN_SUPER, sfs_buffer)) != 0) {
         goto failed_cleanup_sfs_buffer;
     }
@@ -235,6 +238,7 @@ sfs_do_mount(struct device *dev, struct fs **fs_store) {
 
     struct sfs_super *super = sfs_buffer;
     if (super->magic != SFS_MAGIC) {
+    	// 开头一定要是魔数
         cprintf("sfs: wrong magic in superblock. (%08x should be %08x).\n",
                 super->magic, SFS_MAGIC);
         goto failed_cleanup_sfs_buffer;
@@ -246,11 +250,11 @@ sfs_do_mount(struct device *dev, struct fs **fs_store) {
     }
     super->info[SFS_MAX_INFO_LEN] = '\0';
     sfs->super = *super;
-
     ret = -E_NO_MEM;
+
     uint32_t i;
 
-    /* alloc and initialize hash list */
+    /* alloc and initialize hash list, 用于inode */
     list_entry_t *hash_list;
     if ((sfs->hash_list = hash_list = kmalloc(sizeof(list_entry_t) * SFS_HLIST_SIZE)) == NULL) {
         goto failed_cleanup_sfs_buffer;
@@ -294,8 +298,19 @@ sfs_do_mount(struct device *dev, struct fs **fs_store) {
     fs->fs_cleanup = sfs_cleanup;
     *fs_store = fs;
     return 0;
+
+failed_cleanup_freemap:
+    bitmap_destroy(freemap);
+failed_cleanup_hash_list:
+    kfree(hash_list);
+failed_cleanup_sfs_buffer:
+    kfree(sfs_buffer);
+failed_cleanup_fs:
+    kfree(fs);
+    return ret;
 }
 ```
+
 #### 索引节点
 在SFS文件系统中，需要记录文件内容的存储位置以及文件名与文件内容的对应关系。
 - sfs_disk_inode记录了文件或目录的内容存储的索引信息，该数据结构在硬盘里储存，需要时读入内存。
@@ -831,12 +846,16 @@ sysfile_open(const char *__path, uint32_t open_flags) {
     - 在文件系统抽象层的处理中，首先调用的是file_open函数，它要给这个即将打开的文件分配一个file数据结构的变量，这个变量其实是当前进程的打开文件数组`current->fs_struct->filemap[]`中的一个空闲元素（即还没用于一个打开的文件），而这个元素的索引值就是最终要返回到用户进程并赋值给变量fd1。到了这一步还仅仅是给当前用户进程分配了一个file数据结构的变量，还没有找到对应的文件索引节点。
 
 - 调用`vfs_open`函数来找到path指出的文件所对应的基于inode数据结构的VFS索引节点node。
-    - `vfs_open`函数需要完成两件事情：
-        - 通过vfs_lookup找到path对应文件的inode；
-        - 调用vop_open函数打开文件。
-    - 找到文件设备的根目录“/”的索引节点需要注意，这里的`vfs_lookup`函数是一个针对目录的操作函数，它会调用`vop_lookup`函数来找到SFS文件系统中的“/”目录下的“sfs_filetest1”文件。为此，`vfs_lookup`函数首先调用`get_device`函数，并进一步调用`vfs_get_bootfs`函数来找到根目录“/”对应的inode。这个inode就是位于vfs.c中的inode变量bootfs_node。这个变量在init_main函数（位于kern/process/proc.c）执行时获得了赋值。
-    - 通过调用vop_lookup函数来查找到根目录“/”下对应文件sfs_filetest1的索引节点，如果找到就返回此索引节点。
-- 把file和node建立联系。完成后，将返回到file_open函数中，通过执行语句“file->node=node;”，就把当前进程的current->fs_struct->filemap[fd]（即file所指变量）的成员变量node指针指向了代表sfs_filetest1文件的索引节点inode。
+    - `vfs_open`函数需要完成：
+        - 确定读写权限；
+        - 通过vfs_lookup找到path对应文件的inode；首先是调用get_device，先对路径字符串进行判断，看是不是声明了设备（有：）或者是绝对路径（有/）。如果是相对路径，调用vfs_get_curdir获得当前的路径。如果有设备名，则根据路径中的设备名在设备list中找到这个设备，返回一个inode。如果是绝对路径，则返回根目录。如果开头有个‘:’，说明是在当前文件系统中，返回的是当前目录。
+        - 找到文件设备的根目录“/”的索引节点需要注意，这里的`vfs_lookup`函数是一个针对目录的操作函数，它会调用`vop_lookup`函数来找到SFS文件系统中的“/”目录下的“sfs_filetest1”文件。为此，`vfs_lookup`函数首先调用`get_device`函数，并进一步调用`vfs_get_bootfs`函数来找到根目录“/”对应的inode。这个inode就是位于vfs.c中的inode变量bootfs_node。这个变量在init_main函数（位于kern/process/proc.c）执行时获得了赋值。
+        - 通过调用vop_lookup函数来查找到根目录“/”下对应文件sfs_filetest1的索引节点，如果找到就返回此索引节点。
+    - 调用vop_open函数打开文件。
+    - 调用了vop_truncate（应该是这个sfs_truncfile），调整文件大小到适当的大小（按照块个数计算）
+    - 调用了vfs_fsync，如果发生了什么使得这个块变成dirty了，就调用d_io把它写进去。
+    
+- 把file和node建立联系，设置file的读写权限，如果是append模式的话还要把file的pos设置到末尾。完成后，将返回到file_open函数中，通过执行语句“file->node=node;”，就把当前进程的current->fs_struct->filemap[fd]（即file所指变量）的成员变量node指针指向了代表sfs_filetest1文件的索引节点inode。
 - 这时返回fd。经过重重回退，通过系统调用返回，用户态的syscall->sys_open->open->safe_open等用户函数的层层函数返回，最终把fd赋值给fd1。自此完成了打开文件操作。
 ```
 // open file
@@ -892,7 +911,34 @@ file_open(char *path, uint32_t open_flags) {
 
 sfs_lookup有三个参数：node，path，node_store。其中node是根目录“/”所对应的inode节点；path是文件sfs_filetest1的绝对路径/sfs_filetest1，而node_store是经过查找获得的sfs_filetest1所对应的inode节点。
 sfs_lookup函数以“/”为分割符，从左至右逐一分解path获得各个子目录和最终文件对应的inode节点。在本例中是调用sfs_lookup_once查找以根目录下的文件sfs_filetest1所对应的inode节点。当无法分解path后，就意味着找到了sfs_filetest1对应的inode节点，就可顺利返回了。
-
+```
+/*
+ * sfs_lookup - Parse path relative to the passed directory
+ *              DIR, and hand back the inode for the file it
+ *              refers to.
+ */
+static int
+sfs_lookup(struct inode *node, char *path, struct inode **node_store) {
+    struct sfs_fs *sfs = fsop_info(vop_fs(node), sfs);
+    assert(*path != '\0' && *path != '/');
+    vop_ref_inc(node);
+    struct sfs_inode *sin = vop_info(node, sfs_inode);
+    // 找到sfs_inode __sfs_inode_info。
+    if (sin->din->type != SFS_TYPE_DIR) {
+        vop_ref_dec(node);
+        return -E_NOTDIR;
+    }
+    struct inode *subnode;
+    int ret = sfs_lookup_once(sfs, sin, path, &subnode, NULL);
+    // 找到与路径相符的inode并加载到subnode里。
+    vop_ref_dec(node);
+    if (ret != 0) {
+        return ret;
+    }
+    *node_store = subnode;
+    return 0;
+}
+```
 
 #### 读文件
 用户进程有如下语句：
@@ -966,6 +1012,7 @@ sysfile_read(int fd, void *base, size_t len) {
             lock_mm(mm);
             {
                 if (copy_to_user(mm, base, buffer, alen)) {
+                    // copy_to_user在vmm.c中，检查权限后memcpy
                     assert(len >= alen);
                     base += alen, len -= alen, copied += alen;
                 }
@@ -1011,7 +1058,7 @@ file_read(int fd, void *base, size_t len, size_t *copied_store) {
 
     struct iobuf __iob, *iob = iobuf_init(&__iob, base, len, file->pos);
     ret = vop_read(file->node, iob);
-    // 文件内容读到iob中
+    // 文件内容读到iob中，通过sfs_read --> sfs_io，获取到inode，执行sfs_io_nolock。
 
     size_t copied = iobuf_used(iob);
     if (file->status == FD_OPENED) {
@@ -1086,7 +1133,7 @@ proc->filesp = NULL;
 
 ```
 /*
- * sfs_io_nolock - Rd/Wr a file contentfrom offset position to offset+ length  disk blocks<-->buffer (in memroy) * @sfs:      sfs file system
+ * sfs_io_nolock - Rd/Wr a file contentfrom offset position to offset+ length  disk blocks<-->buffer (in memroy) * * @sfs:      sfs file system
  * @sin:      sfs inode in memory
  * @buf:      the buffer Rd/Wr
  * @offset:   the offset of file
@@ -1099,7 +1146,7 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
     assert(din->type != SFS_TYPE_DIR);
     off_t endpos = offset + *alenp, blkoff;
     *alenp = 0;
-        // calculate the Rd/Wr end position
+    // 计算出读写的长度，从初始偏移量走到文件的哪个位置
     if (offset < 0 || offset >= SFS_MAX_FILE_SIZE || offset > endpos) {
         return -E_INVAL;
     }
@@ -1109,6 +1156,8 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
     if (endpos > SFS_MAX_FILE_SIZE) {
         endpos = SFS_MAX_FILE_SIZE;
     }
+    // 文件过大，到了最大支持的文件长度了
+
     if (!write) {
         if (offset >= din->size) {
             return 0;
@@ -1117,6 +1166,7 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
             endpos = din->size;
         }
     }
+    // 如果end position超过了文件大小，就把它移动到这个文件的末尾
 
     int (*sfs_buf_op)(struct sfs_fs *sfs, void *buf, size_t len, uint32_t blkno, off_t offset);
     int (*sfs_block_op)(struct sfs_fs *sfs, void *buf, uint32_t blkno, uint32_t nblks);
@@ -1126,27 +1176,60 @@ sfs_io_nolock(struct sfs_fs *sfs, struct sfs_inode *sin, void *buf, off_t offset
     else {
         sfs_buf_op = sfs_rbuf, sfs_block_op = sfs_rblock;
     }
-    // 设置读取的函数操作
+    // 设置读取/写入的函数操作
 
     int ret = 0;
     size_t size, alen = 0;
     uint32_t ino;
-    uint32_t blkno = offset / SFS_BLKSIZE;          // The NO. of Rd/Wr begin block
-    uint32_t nblks = endpos / SFS_BLKSIZE - blkno;  // The size of Rd/Wr blocks
+    uint32_t blkno = offset / SFS_BLKSIZE;          // 起始的block序号
+    uint32_t nblks = endpos / SFS_BLKSIZE - blkno;  // 一共要读写多少个block？
 
-//LAB8:EXERCISE1 YOUR CODE HINT: call sfs_bmap_load_nolock, sfs_rbuf, sfs_rblock,etc. read different kind of b
-locks in file
-        /*
-         * (1) If offset isn't aligned with the first block, Rd/Wr some content from offset to the end of the fi
-rst block
-         *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op
-         *               Rd/Wr size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - offset)
-         * (2) Rd/Wr aligned blocks
-         *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_block_op
-         * (3) If end position isn't aligned with the last block, Rd/Wr some content from begin to the (endpos % SFS
-_BLKSIZE) of the last block
-         *       NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op
-         */
+//LAB8:EXERCISE1 YOUR CODE 
+//HINT: call sfs_bmap_load_nolock, sfs_rbuf, sfs_rblock,etc. 
+// read different kind of blocks in file
+ /*
+  * (1) If offset isn't aligned with the first block, Rd/Wr some content from offset to the end of the first block
+  * NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op
+  * Rd/Wr size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - offset)
+  * (2) Rd/Wr aligned blocks
+  * NOTICE: useful function: sfs_bmap_load_nolock, sfs_block_op
+  * (3) If end position isn't aligned with the last block, Rd/Wr some content from begin to the (endpos % SFS_BLKSIZE) of the last block
+  * NOTICE: useful function: sfs_bmap_load_nolock, sfs_buf_op
+  */
+    if (offset % SFS_BLKSIZE != 0 || endpos / SFS_BLKSIZE == offset / SFS_BLKSIZE){
+        blkoff = offset % SFS_BLKSIZE;
+        size = (nblks != 0) ? (SFS_BLKSIZE - blkoff) : (endpos - offset);
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, blkno, &ino)) != 0) goto out;
+        if ((ret = sfs_buf_op(sfs, buf, size, ino, blkoff)) != 0) goto out;
+        alen += size;
+        buf += size;
+    }
+    // 处理如果不是从块的开头开始写的情况，如果偏移量%块大小不是0则是从块内部开始写的。如果nblks是0的话说明只有一个块里的一部分需要写。先把这个写了。
+
+    uint32_t my_nblks = nblks;
+    if (offset % SFS_BLKSIZE != 0 && my_nblks > 0)
+        my_nblks --;
+    // 如果是从一个块的一部分开始写的，那在总的块数上需要减一。
+    if (my_nblks > 0) {
+        int temp_blkno = (offset % SFS_BLKSIZE == 0) ? blkno: blkno + 1
+        if ((ret = sfs_bmap_load_nolock(sfs, sin, temp_blkno, &ino)) != 0)
+            goto out;
+        if ((ret = sfs_block_op(sfs, buf, ino, my_nblks)) != 0)
+        // 这里的sfs_block_op是一个循环，把mu_nblks个块进行读写，跟开头和结尾的那个sfs_buf_op不一样
+            goto out;
+        size = SFS_BLKSIZE * my_nblks;
+        alen += size;
+        buf += size;
+    }
+
+    //下边就是处理如果最后一部分是最后一块的一部分的了，ino存储了disk上的inode的编号，然后在下边的sfs_buf_op中，处理最后一小块
+    if (endpos % SFS_BLKSIZE != 0 && endpos / SFS_BLKSIZE != offset / SFS_BLKSIZE) {
+            size = endpos % SFS_BLKSIZE;
+            if ((ret = sfs_bmap_load_nolock(sfs, sin, endpos / SFS_BLKSIZE, &ino) == 0) != 0) goto out;
+            if ((ret = sfs_buf_op(sfs, buf, size, ino, 0)) != 0) goto out;
+            alen += size;
+            buf += size;
+    }
 out:
     *alenp = alen;
     if (offset + alen > sin->din->size) {
@@ -1158,12 +1241,12 @@ out:
 ```
  
 - 请在实验报告中给出设计实现”UNIX的PIPE机制“的概要设方案，鼓励给出详细设计方案。
-    - PIPE机制可以看成是一个缓冲区，可以在磁盘上（或内存中？）保留一部分空间作为pipe机制的缓冲区。当两个进程之间要求建立pipe时，在两个进程的进程控制块上修改某些属性表明这个晋城市管道数据的发送方还是接受方，这样就可以将stdin或stdout重定向到生成的临时文件里，在两个进程中打开这个临时文件。
+    - PIPE机制可以看成是一个缓冲区，可以在磁盘上（或内存中？）保留一部分空间作为pipe机制的缓冲区。当两个进程之间要求建立pipe时，在两个进程的进程控制块上修改某些属性表明这个进程是管道数据的发送方还是接受方，这样就可以将stdin或stdout重定向到生成的临时文件里，在两个进程中打开这个临时文件。
     - 当进程A使用stdout写时，查询PCB中的相关变量，把这些stdout数据输出到临时文件中；
     - 当进程B使用stdin的时候，查询PCB中的信息，从临时文件中读取数据；
 
 ### 练习2: 完成基于文件系统的执行程序机制的实现
-改写proc.c中的load_icode函数和其他相关函数，实现基于文件系统的执行程序机制。执行： make qemu。如果能看看到sh用户程序的执行界面，则基本成功了。如果在sh用户界面上可 以执行”ls”,”hello”等其他放置在sfs文件系统中的其他执行程序，则可以认为本实验基本成功。
+改写proc.c中的load_icode函数和其他相关函数，实现基于文件系统的执行程序机制。首先是在do_execve中进行文件名和命令行参数的复制，执行sysfie_open打开相关文件，fd是已经打开的这个文件。执行： make qemu。如果能看看到sh用户程序的执行界面，则基本成功了。如果在sh用户界面上可 以执行”ls”,”hello”等其他放置在sfs文件系统中的其他执行程序，则可以认为本实验基本成功。
 
 - 给要执行的用户进程创建一个新的内存管理结构mm，
 - 创建用户内存空间的新的页目录表；
@@ -1179,118 +1262,233 @@ out:
 - 设置好用户栈上的信息，即需要传递给执行程序的参数；
 - 设置好中断帧；
 
-
-
-
-
 ```
-/*
- * sfs_do_mount - mount sfs file system.
- *
- * @dev:        the block device contains sfs file system
- * @fs_store:   the fs struct in memroy
- */
 static int
-sfs_do_mount(struct device *dev, struct fs **fs_store) {
-    static_assert(SFS_BLKSIZE >= sizeof(struct sfs_super));
-    static_assert(SFS_BLKSIZE >= sizeof(struct sfs_disk_inode));
-    static_assert(SFS_BLKSIZE >= sizeof(struct sfs_disk_entry));
-
-    if (dev->d_blocksize != SFS_BLKSIZE) {
-        return -E_NA_DEV;
+load_icode(int fd, int argc, char **kargv) {
+    /* LAB8:EXERCISE2 YOUR CODE  HINT:how to load the file with handler fd  in to process's memory? how to setup argc/argv?
+     * MACROs or Functions:
+     *  mm_create        - create a mm
+     *  setup_pgdir      - setup pgdir in mm
+     *  load_icode_read  - read raw data content of program file
+     *  mm_map           - build new vma
+     *  pgdir_alloc_page - allocate new memory for  TEXT/DATA/BSS/stack parts
+     *  lcr3             - update Page Directory Addr Register -- CR3
+     *
+     * (1) create a new mm for current process
+     * (2) create a new PDT, and mm->pgdir= kernel virtual addr of PDT
+     * (3) copy TEXT/DATA/BSS parts in binary to memory space of process
+     *    (3.1) read raw data content in file and resolve elfhdr
+     *    (3.2) read raw data content in file and resolve proghdr based on info in elfhdr
+     *    (3.3) call mm_map to build vma related to TEXT/DATA
+     *    (3.4) callpgdir_alloc_page to allocate page for TEXT/DATA, read contents in file
+     *          and copy them into the new allocated pages
+     *    (3.5) callpgdir_alloc_page to allocate pages for BSS, memset zero in these pages
+     * (4) call mm_map to setup user stack, and put parameters into user stack
+     * (5) setup current process's mm, cr3, reset pgidr (using lcr3 MARCO)
+     * (6) setup uargc and uargv in user stacks
+     * (7) setup trapframe for user environment
+     * (8) if up steps failed, you should cleanup the env.
+     */
+    if (current->mm != NULL) {
+        panic("load_icode: current->mm must be empty.\n");
     }
-
-    /* allocate fs structure */
-    struct fs *fs;
-    if ((fs = alloc_fs(sfs)) == NULL) {
-        return -E_NO_MEM;
-    }
-    struct sfs_fs *sfs = fsop_info(fs, sfs);
-    sfs->dev = dev;
 
     int ret = -E_NO_MEM;
-    void *sfs_buffer;
-    if ((sfs->sfs_buffer = sfs_buffer = kmalloc(SFS_BLKSIZE)) == NULL) {
-        goto failed_cleanup_fs;
+    struct mm_struct *mm;
+    //(1) create a new mm for current process
+    if ((mm = mm_create()) == NULL) {
+        goto bad_mm;
     }
+    //(2) create a new PDT, and mm->pgdir= kernel virtual addr of PDT
+    if (setup_pgdir(mm) != 0) {
+        goto bad_pgdir_cleanup_mm;
+    }
+    //(3) copy TEXT/DATA section, build BSS parts in binary to memory space of process
+    struct Page *page;
+    //(3.1) get the file header of the bianry program (ELF format)
+    struct elfhdr elf;
+    off_t offset = 0;
 
-    /* load and check superblock */
-    if ((ret = sfs_init_read(dev, SFS_BLKN_SUPER, sfs_buffer)) != 0) {
-        goto failed_cleanup_sfs_buffer;
+    if((ret = load_icode_read(fd, (void*)&elf, sizeof(struct elfhdr), 0)) != 0) {
+        // elf header读取到elf中，这里的参数比较复杂需要先取地址再类型转换
+        goto bad_elf_cleanup_pgdir;
+    }	
+    if (elf.e_magic != ELF_MAGIC) {
+        //检查是不是魔数，如果是的话才是对的elf文件
+        ret = -E_INVAL_ELF;
+        goto bad_elf_cleanup_pgdir;
     }
+    offset += sizeof(struct elfhdr);
+    // 这个文件已经读取到elf header 之后了
 
-    ret = -E_INVAL;
+    uint32_t vm_flags, perm;
+    struct proghdr ph;
+    for (int i=0; i < elf.e_phnum; i ++) {
+    // e_phnum is number of entries in program header.
+    //(3.4) find every program section headers
+    // 第二三个参数分别是读取的长度和在文件中的偏移量。
+    	off_t phoff = elf.e_phoff + sizeof(struct proghdr) * i;
+        load_icode_read(fd, (void*)&ph, sizeof(struct proghdr), phoff);
+        if (ph.p_type != ELF_PT_LOAD) {
+            continue ;
+        }
+        if (ph.p_filesz > ph.p_memsz) {
+            ret = -E_INVAL_ELF;
+            goto bad_cleanup_mmap;
+        }
+        if (ph.p_filesz == 0) {
+            continue ;
+        }
+        // call mm_map fun to setup the new vma ( ph->p_va, ph->p_memsz)
+        vm_flags = 0, perm = PTE_U;
+        if (ph.p_flags & ELF_PF_X) vm_flags |= VM_EXEC;
+        if (ph.p_flags & ELF_PF_W) vm_flags |= VM_WRITE;
+        if (ph.p_flags & ELF_PF_R) vm_flags |= VM_READ;
+        if (vm_flags & VM_WRITE) perm |= PTE_W;
+        if ((ret = mm_map(mm, ph.p_va, ph.p_memsz, vm_flags, NULL)) != 0) {
+            goto bad_cleanup_mmap;
+        }
+        // 虚拟内存管理的权限控制，并设置映射
+        
+	    offset = ph.p_offset;
+        size_t off, size;
+        uintptr_t start = ph.p_va, end=ph.p_va+ph.p_filesz, la = ROUNDDOWN(start, PGSIZE);
+        // start 和 end 是vma中的segment的起始和结尾
+        ret = -E_NO_MEM;
 
-    struct sfs_super *super = sfs_buffer;
-    if (super->magic != SFS_MAGIC) {
-        cprintf("sfs: wrong magic in superblock. (%08x should be %08x).\n",
-                super->magic, SFS_MAGIC);
-        goto failed_cleanup_sfs_buffer;
-    }
-    if (super->blocks > dev->d_blocks) {
-        cprintf("sfs: fs has %u blocks, device has %u blocks.\n",
-                super->blocks, dev->d_blocks);
-        goto failed_cleanup_sfs_buffer;
-    }
-    super->info[SFS_MAX_INFO_LEN] = '\0';
-    sfs->super = *super;
-    ret = -E_NO_MEM;
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+            	ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            off = start - la, size = PGSIZE - off, la += PGSIZE;
+            if (end < la) {
+                size -= la - end;
+            }
+	        load_icode_read(fd, page2kva(page)+off, size, offset);
+            //memcpy(page2kva(page) + off, from, size);
+            start += size, offset += size;
+        }
 
-    uint32_t i;
-
-    /* alloc and initialize hash list */
-    list_entry_t *hash_list;
-    if ((sfs->hash_list = hash_list = kmalloc(sizeof(list_entry_t) * SFS_HLIST_SIZE)) == NULL) {
-        goto failed_cleanup_sfs_buffer;
-    }
-    for (i = 0; i < SFS_HLIST_SIZE; i ++) {
-        list_init(hash_list + i);
-    }
-
-    /* load and check freemap */
-    struct bitmap *freemap;
-    uint32_t freemap_size_nbits = sfs_freemap_bits(super);
-    if ((sfs->freemap = freemap = bitmap_create(freemap_size_nbits)) == NULL) {
-        goto failed_cleanup_hash_list;
-    }
-    uint32_t freemap_size_nblks = sfs_freemap_blocks(super);
-    if ((ret = sfs_init_freemap(dev, freemap, SFS_BLKN_FREEMAP, freemap_size_nblks, sfs_buffer)) != 0) {
-        goto failed_cleanup_freemap;
-    }
-
-    uint32_t blocks = sfs->super.blocks, unused_blocks = 0;
-    for (i = 0; i < freemap_size_nbits; i ++) {
-        if (bitmap_test(freemap, i)) {
-            unused_blocks ++;
+      // build BSS section of binary program
+        end = ph.p_va + ph.p_memsz;
+        if (start < la) {
+            /* ph->p_memsz == ph->p_filesz */
+            if (start == end) {
+                continue ;
+            }
+            off = start + PGSIZE - la, size = PGSIZE - off;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page) + off, 0, size);
+            start += size;
+            assert((end < la && start == end) || (end >= la && start == la));
+        }
+        while (start < end) {
+            if ((page = pgdir_alloc_page(mm->pgdir, la, perm)) == NULL) {
+            	ret = -E_NO_MEM;
+                goto bad_cleanup_mmap;
+            }
+            off = start - la, size = PGSIZE - off, la += PGSIZE;
+            if (end < la) {
+                size -= la - end;
+            }
+            memset(page2kva(page), 0, size);
+            start += size;
         }
     }
-    assert(unused_blocks == sfs->super.unused_blocks);
+    sysfile_close(fd);
+    //(4) build user stack memory
+    vm_flags = VM_READ | VM_WRITE | VM_STACK;
+    if ((ret = mm_map(mm, USTACKTOP - USTACKSIZE, USTACKSIZE, vm_flags, NULL)) != 0) {
+        goto bad_cleanup_mmap;
+    }
 
-    /* and other fields */
-    sfs->super_dirty = 0;
-    sem_init(&(sfs->fs_sem), 1);
-    sem_init(&(sfs->io_sem), 1);
-    sem_init(&(sfs->mutex_sem), 1);
-    list_init(&(sfs->inode_list));
-    cprintf("sfs: mount: '%s' (%d/%d/%d)\n", sfs->super.info,
-            blocks - unused_blocks, unused_blocks, blocks);
+    uint32_t stacktop = USTACKTOP;
+    uint32_t argsize = 0;
+    for(int j = 0; j< argc ; j++)
+        argsize += (1 + strlen(kargv[j]));
+    // 计算传进来的参数的大小和长度，并进行取整
+    argsize = (argsize / sizeof(long)+1)*sizeof(long);
+    argsize += (2+argc)*sizeof(long);
+    stacktop = USTACKTOP - argsize;
+    uint32_t pagen = argsize / PGSIZE + 4;
+    for (int j = 1; j <= 4; ++ j) {
+        assert(pgdir_alloc_page(mm->pgdir, USTACKTOP-PGSIZE*j , PTE_USER) != NULL);
+    }
+    //(5) set current process's mm, sr3, and set CR3 reg = physical addr of Page Directory
+    mm_count_inc(mm);
+    current->mm = mm;
+    current->cr3 = PADDR(mm->pgdir);
+    lcr3(PADDR(mm->pgdir));
 
-    /* link addr of sync/get_root/unmount/cleanup funciton  fs's function pointers*/
-    fs->fs_sync = sfs_sync;
-    fs->fs_get_root = sfs_get_root;
-    fs->fs_unmount = sfs_unmount;
-    fs->fs_cleanup = sfs_cleanup;
-    *fs_store = fs;
-    return 0;
+    //(6) setup trapframe for user environment
+    uint32_t now_pos = stacktop, argvp;
+    *((uint32_t*)now_pos) = argc;
+    now_pos += 4;
+    *((uint32_t *) now_pos) = argvp = now_pos + 4;
+    now_pos += 4;
+    now_pos += argc*4;
+    //压栈
+    for (int j = 0; j < argc; ++ j) {
+        argsize = strlen(kargv[j]) + 1; 
+        memcpy((void *) now_pos, kargv[j], argsize);
+        *((uint32_t *) (argvp + j * 4)) = now_pos;
+        now_pos += argsize;
+    }	
 
-failed_cleanup_freemap:
-    bitmap_destroy(freemap);
-failed_cleanup_hash_list:
-    kfree(hash_list);
-failed_cleanup_sfs_buffer:
-    kfree(sfs_buffer);
-failed_cleanup_fs:
-    kfree(fs);
+    /* LAB5:EXERCISE1 YOUR CODE
+     * should set tf_cs,tf_ds,tf_es,tf_ss,tf_esp,tf_eip,tf_eflags
+     * NOTICE: If we set trapframe correctly, then the user level process can return to USER MODE from kernel. So
+     *          tf_cs should be USER_CS segment (see memlayout.h)
+     *          tf_ds=tf_es=tf_ss should be USER_DS segment
+     *          tf_esp should be the top addr of user stack (USTACKTOP)
+     *          tf_eip should be the entry point of this binary program (elf->e_entry)
+     *          tf_eflags should be set to enable computer to produce Interrupt
+     */
+    struct trapframe *tf = current->tf;
+    memset(tf, 0, sizeof(struct trapframe));
+    tf->tf_cs = USER_CS;
+    tf->tf_ds = tf->tf_es = tf->tf_ss = USER_DS;
+    tf->tf_esp = stacktop;
+    tf->tf_eip = elf.e_entry;
+    tf->tf_eflags = 0x2 | FL_IF; // to enable interrupt
+    ret = 0;
+out:
     return ret;
+bad_cleanup_mmap:
+    exit_mmap(mm);
+bad_elf_cleanup_pgdir:
+    put_pgdir(mm);
+bad_pgdir_cleanup_mm:
+    mm_destroy(mm);
+bad_mm:
+    goto out;
 }
+
 ```
+
+UNIX的硬链接和软链接机制：
+
+硬链接：
+- 文件有相同的 inode 及 data block；
+- 只能对已存在的文件进行创建；
+- 不能交叉文件系统进行硬链接的创建；
+- 不能对目录进行创建，只可对文件创建；
+- 删除一个硬链接文件并不影响其他有相同 inode 号的文件。
+
+软链接：
+- 软链接有自己的文件属性及权限等；
+- 可对不存在的文件或目录创建软链接；
+- 软链接可交叉文件系统；
+- 软链接可对文件或目录创建；
+- 创建软链接时，链接计数 i_nlink 不会增加；
+- 删除软链接并不影响被指向的文件，但若被指向的原文件被删除，则相关软连接被称为死链接
+
+硬链接： 与普通文件没什么不同，inode 都指向同一个文件在硬盘中的区块
+软链接： 保存了其代表的文件的绝对路径，是另外一种文件，在硬盘上有独立的区块，访问时替换自身路径。
+
+sfs_disk_inode结构体中有一个nlinks变量，如果要创建一个文件的软链接，这个软链接也要创建inode，只是它的类型是链接，找一个域设置它所指向的文件inode，如果文件是一个链接，就可以通过保存的inode位置进行操作；当删除一个软链接时，直接删掉inode即可；
+
+硬链接与文件是共享inode的，如果创建一个硬链接，需要将源文件中的被链接的计数加1；当删除一个硬链接的时候，除了需要删掉inode之外，还需要将硬链接指向的文件的被链接计数减1，如果减到了0，则需要将A删除掉；

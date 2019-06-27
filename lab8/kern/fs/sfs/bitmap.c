@@ -38,12 +38,12 @@ bitmap_create(uint32_t nbits) {
     /* mark any leftover bits at the end in use(0) */
     if (nbits != nwords * WORD_BITS) {
         uint32_t ix = nwords - 1, overbits = nbits - ix * WORD_BITS;
-
         assert(nbits / WORD_BITS == ix);
         assert(overbits > 0 && overbits < WORD_BITS);
-
+	cprintf("overbits %d", overbits);
         for (; overbits < WORD_BITS; overbits ++) {
-            bitmap->map[ix] ^= (1 << overbits);
+            cprintf("overbits %d\n",overbits);
+	    bitmap->map[ix] ^= (1 << overbits);
         }
     }
     return bitmap;

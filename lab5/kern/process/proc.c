@@ -640,8 +640,8 @@ load_icode(unsigned char *binary, size_t size) {
     tf->tf_ds = tf->tf_es = tf->tf_ss = USER_DS;
     tf->tf_esp = USTACKTOP;
     tf->tf_eip = elf->e_entry;
-    tf->tf_eflags = 0x00000002 | FL_IF; // to enable interrupt
-    //tf->tf_eflags = FL_IF; // to enable interrupt
+    //tf->tf_eflags = 0x00000002 | FL_IF; // to enable interrupt, why?
+    tf->tf_eflags = FL_IF; // to enable interrupt
     ret = 0;
 out:
     return ret;

@@ -72,7 +72,7 @@ stride_enqueue(struct run_queue *rq, struct proc_struct *proc) {
       * (4) increase rq->proc_num
       */
       rq->lab6_run_pool = skew_heap_insert(rq->lab6_run_pool, &proc->lab6_run_pool, proc_stride_comp_f);
-      if(proc->time_slice == 0 || proc->time_slice > rq->max_time_slice) {
+      if(proc->time_slice==0 || proc->time_slice>rq->max_time_slice) {
           proc->time_slice = rq->max_time_slice;
       }
       proc->rq = rq;

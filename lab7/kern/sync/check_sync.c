@@ -208,7 +208,7 @@ void phi_put_forks_condvar(int i) {
      // I ate over
      // test left and right neighbors
 //--------leave routine in monitor--------------
-    state_condvar[i] = THINKING;
+    state_condvar[i] = THINKING;//stop eat
     cprintf("phi_put_forks_condvar: %d finished eating\n", i); 
     phi_test_condvar((i + N - 1) % N);
     phi_test_condvar((i + 1) % N);
